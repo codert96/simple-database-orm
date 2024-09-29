@@ -7,14 +7,12 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Transient;
 import lombok.SneakyThrows;
 import lombok.experimental.UtilityClass;
-import org.springframework.beans.BeanUtils;
 import org.springframework.cglib.core.ReflectUtils;
 import org.springframework.jdbc.support.JdbcUtils;
 import org.springframework.util.ClassUtils;
 import org.springframework.util.ReflectionUtils;
 import org.springframework.util.StringUtils;
 
-import java.beans.Introspector;
 import java.beans.PropertyDescriptor;
 import java.lang.invoke.SerializedLambda;
 import java.lang.reflect.Field;
