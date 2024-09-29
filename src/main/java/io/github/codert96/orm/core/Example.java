@@ -13,10 +13,12 @@ import org.springframework.jdbc.core.ColumnMapRowMapper;
 import org.springframework.jdbc.core.namedparam.BeanPropertySqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcOperations;
 import org.springframework.lang.NonNull;
+import org.springframework.util.ReflectionUtils;
 import org.springframework.util.StopWatch;
 
 import java.io.Serial;
 import java.io.Serializable;
+import java.lang.reflect.Field;
 import java.text.MessageFormat;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -46,24 +48,43 @@ public class Example<DTO, T> implements Serializable {
 
     private final List<String> lastExpressions = new ArrayList<>();
 
+    private final List<String> setExpressions = new ArrayList<>();
+
     @Setter
-    @Accessors(chain = true)
+    @Accessors(chain = true, fluent = true)
     private boolean useBefore = true;
 
     @Setter
-    @Accessors(chain = true)
+    @Accessors(chain = true, fluent = true)
     private boolean useAfter = true;
 
     @Setter(AccessLevel.PRIVATE)
-    @Accessors(chain = true)
+    @Accessors(chain = true, fluent = true)
     private String tableName;
+
+    @Setter
+    @Accessors(chain = true, fluent = true)
+    private boolean setAllNotNull = true;
+
+    @Setter
+    @Accessors(chain = true, fluent = true)
+    private boolean setAllIncludeNull = false;
+
+    @Setter
+    @Accessors(chain = true, fluent = true)
+    private boolean deleteAll = false;
     private final List<Consumer<Example<DTO, ?>>> beforeQuery = new ArrayList<>();
     private final List<Consumer<List<?>>> afterQuery = new ArrayList<>();
 
 
     public static <DTO, T> Example<DTO, T> of(@NonNull DTO dto, @NonNull Class<T> entityClass) {
         Utils.extract(entityClass);
-        return new Example<>(dto, entityClass).setTableName(Utils.extractTableName(entityClass));
+        return new Example<>(dto, entityClass).tableName(Utils.extractTableName(entityClass));
+    }
+
+    public static <DTO> Example<DTO, DTO> of(@NonNull DTO dto) {
+        //noinspection unchecked
+        return (Example<DTO, DTO>) of(dto, dto.getClass());
     }
 
     public final Example<DTO, T> first(String... first) {
@@ -411,7 +432,7 @@ public class Example<DTO, T> implements Serializable {
 
     public Page<T> page(Page<T> page) {
         Long count = copy()
-                .setUseAfter(false)
+                .useAfter(false)
                 .count("1");
         page.setTotal(count);
         if (Objects.equals(0L, count)) {
@@ -424,17 +445,27 @@ public class Example<DTO, T> implements Serializable {
         return page;
     }
 
+    @SafeVarargs
+    public final <R> Example<DTO, T> set(ColumnFunction<DTO, R>... columns) {
+        for (ColumnFunction<DTO, R> column : columns) {
+            ColumnInfo columnInfo = Utils.extractColumn(column);
+            String formatted = "%s = :%s".formatted(columnInfo.getColumnName(), columnInfo.getFieldName());
+            setExpressions.add(formatted);
+        }
+        return this;
+    }
+
+    @SafeVarargs
+    public final <R> Example<DTO, T> set(String sqlCorn, ColumnFunction<DTO, R>... columns) {
+        Object[] array = Arrays.stream(columns).map(Utils::extractColumn).map(columnInfo -> ":%s".formatted(columnInfo.getFieldName())).toArray();
+        setExpressions.add(
+                MessageFormat.format(sqlCorn, array)
+        );
+        return this;
+    }
+
     public List<T> list() {
-        if (useBefore) {
-            Configuration.BEFORE_QUERY.forEach(consumer -> consumer.accept(this, resultClass));
-            beforeQuery.forEach(consumer -> consumer.accept(this));
-        }
-        StringJoiner execSql = new StringJoiner(" ");
-        if (!firstExpressions.isEmpty()) {
-            execSql.add(
-                    String.join(System.lineSeparator(), firstExpressions)
-            );
-        }
+        StringJoiner execSql = before();
         execSql.add("SELECT");
         if (selectExpressions.isEmpty()) {
             List<String> extract = Utils.extract(resultClass);
@@ -485,6 +516,123 @@ public class Example<DTO, T> implements Serializable {
         ;
         log.debug(formatLog.toString());
         return result;
+    }
+
+    public boolean update() {
+        StringJoiner execSql = before();
+        execSql.add("UPDATE")
+                .add(tableName)
+                .add("SET");
+        if (setExpressions.isEmpty()) {
+            List<ColumnInfo> columns = Utils.extractColumns(dto.getClass());
+            if (setAllNotNull && !setAllIncludeNull) {
+                columns.stream()
+                        .filter(columnInfo -> {
+                            String fieldName = columnInfo.getFieldName();
+                            Field field = ReflectionUtils.findField(dto.getClass(), fieldName);
+                            if (Objects.isNull(field)) {
+                                return false;
+                            }
+                            Object obj = ReflectionUtils.getField(field, dto);
+                            return Objects.nonNull(obj);
+                        })
+                        .forEach(columnInfo -> setExpressions.add(
+                                "%s = :%s".formatted(columnInfo.getColumnName(), columnInfo.getFieldName())
+                        ));
+
+            } else if (setAllIncludeNull) {
+                columns.forEach(columnInfo -> setExpressions.add(
+                        "%s = :%s".formatted(columnInfo.getColumnName(), columnInfo.getFieldName())
+                ));
+            }
+        }
+        if (setExpressions.isEmpty()) {
+            return false;
+        }
+        execSql.add(String.join(", ", setExpressions));
+        if (!whereExpressions.isEmpty()) {
+            execSql.add("WHERE").add(toWhere());
+        }
+        if (!lastExpressions.isEmpty()) {
+            execSql.add(
+                    String.join(System.lineSeparator(), lastExpressions)
+            );
+        }
+        return update(execSql);
+    }
+
+    public boolean save() {
+        if (!whereExpressions.isEmpty() && update()) {
+            return true;
+        }
+        StringJoiner execSql = before();
+        List<ColumnInfo> list = Utils.extractColumns(dto.getClass());
+
+        List<String> columns = new ArrayList<>();
+        List<String> values = new ArrayList<>();
+        list.forEach(columnInfo -> {
+            columns.add(columnInfo.getColumnName());
+            values.add(":".concat(columnInfo.getFieldName()));
+        });
+        execSql.add("INSERT INTO")
+                .add(tableName)
+                .add("(")
+                .add(String.join(", ", columns))
+                .add(")")
+                .add("VALUES")
+                .add("(")
+                .add(String.join(", ", values))
+                .add(")");
+        return update(execSql);
+    }
+
+    private boolean update(StringJoiner execSql) {
+        String sql = execSql.toString();
+        StopWatch stopWatch = new StopWatch("更新：%s".formatted(tableName));
+        stopWatch.start("执行SQL");
+        int update = namedParameterJdbcOperations.update(sql, new BeanPropertySqlParameterSource(dto));
+        StringJoiner formatLog = new StringJoiner(System.lineSeparator());
+        formatLog.add("")
+                .add(stopWatch.prettyPrint(TimeUnit.SECONDS).concat("-".repeat(42)))
+                .add(Utils.formatSql(sql, dto))
+                .add("-".repeat(42))
+                .add("update size: " + update)
+                .add("-".repeat(42))
+        ;
+        log.debug(formatLog.toString());
+        return update != 0;
+    }
+
+    public boolean delete() {
+        StringJoiner execSql = before();
+        execSql.add("DELETE FROM")
+                .add(tableName);
+        if (whereExpressions.isEmpty() && !deleteAll) {
+            return false;
+        }
+        if (!whereExpressions.isEmpty()) {
+            execSql.add("WHERE").add(toWhere());
+        }
+        if (!lastExpressions.isEmpty()) {
+            execSql.add(
+                    String.join(System.lineSeparator(), lastExpressions)
+            );
+        }
+        return update(execSql);
+    }
+
+    private StringJoiner before() {
+        if (useBefore) {
+            Configuration.BEFORE_QUERY.forEach(consumer -> consumer.accept(this, resultClass));
+            beforeQuery.forEach(consumer -> consumer.accept(this));
+        }
+        StringJoiner execSql = new StringJoiner(" ");
+        if (!firstExpressions.isEmpty()) {
+            execSql.add(
+                    String.join(System.lineSeparator(), firstExpressions)
+            );
+        }
+        return execSql;
     }
 
     public static class LowerCaseColumnMapRowMapper extends ColumnMapRowMapper {

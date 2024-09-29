@@ -6,7 +6,7 @@
 
     <groupId>io.github.codert96</groupId>
     <artifactId>simple-database-orm</artifactId>
-    <version>0.0.1</version>
+    <version>0.0.3</version>
     <packaging>jar</packaging>
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -102,14 +102,6 @@
 
     </dependencies>
 
-    <profiles>
-        <profile>
-            <id>gpg</id>
-            <activation>
-                <activeByDefault>true</activeByDefault>
-            </activation>
-        </profile>
-    </profiles>
     <build>
         <plugins>
             <plugin>

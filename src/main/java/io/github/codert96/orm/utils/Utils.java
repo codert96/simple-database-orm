@@ -7,12 +7,14 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Transient;
 import lombok.SneakyThrows;
 import lombok.experimental.UtilityClass;
+import org.springframework.beans.BeanUtils;
 import org.springframework.cglib.core.ReflectUtils;
 import org.springframework.jdbc.support.JdbcUtils;
 import org.springframework.util.ClassUtils;
 import org.springframework.util.ReflectionUtils;
 import org.springframework.util.StringUtils;
 
+import java.beans.Introspector;
 import java.beans.PropertyDescriptor;
 import java.lang.invoke.SerializedLambda;
 import java.lang.reflect.Field;
@@ -56,6 +58,15 @@ public class Utils {
     public <DTO> ColumnInfo extractColumn(ColumnFunction<DTO, ?> function) {
         SerializedLambda serializedLambda = extract(function);
         return cache(ClassUtils.forName(serializedLambda.getImplClass().replace("/", "."), null), serializedLambda.getImplMethodName());
+    }
+
+    public List<ColumnInfo> extractColumns(Class<?> clazz) {
+        extract(clazz);
+        return classCache.getOrDefault(clazz.getName(), Map.of())
+                .values()
+                .stream()
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     private ColumnInfo cache(Class<?> clazz, String method) {
@@ -120,18 +131,22 @@ public class Utils {
         String clazzName = clazz.getName();
         if (!classCache.containsKey(clazzName)) {
             PropertyDescriptor[] beanProperties = ReflectUtils.getBeanProperties(clazz);
-            Stream.of(clazz.getMethods())
-                    .filter(method -> Objects.equals(method.getParameterCount(), 0))
-                    .map(Method::getName)
-                    .filter(method -> method.startsWith("get") || method.startsWith("is"))
-                    .sorted()
+            List<String> fieldNames = Stream.of(clazz.getDeclaredFields()).map(Field::getName).toList();
+            Stream.of(beanProperties)
+                    .sorted(Comparator.comparing(propertyDescriptor -> {
+                        String name = propertyDescriptor.getName();
+                        return fieldNames.indexOf(name);
+                    }))
+                    .map(PropertyDescriptor::getReadMethod)
                     .toList()
-                    .forEach(string -> cache(clazz, string));
+                    .forEach(method -> cache(clazz, method.getName()));
         }
-        Map<String, ColumnInfo> map = classCache.getOrDefault(clazzName, Map.of());
-        List<ColumnInfo> list = new ArrayList<>();
-        map.forEach((string, columnInfo) -> list.add(columnInfo));
-        return list.stream().map(ColumnInfo::getColumnName).toList();
+        return classCache.getOrDefault(clazzName, Map.of())
+                .values()
+                .stream()
+                .filter(Objects::nonNull)
+                .map(ColumnInfo::getColumnName)
+                .toList();
     }
 
     public <DTO, R> boolean isIgnore(DTO dto, ColumnFunction<DTO, R> columnFunction) {
